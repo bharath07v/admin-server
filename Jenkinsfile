@@ -1,65 +1,74 @@
 pipeline {
-	agent {
-    	docker {
-        	image 'maven:3.8.8-eclipse-temurin-17'
-    	}
-	}
-
+    agent any
+    
     environment {
-        // Optional: Define any environment variables here
         DOCKER_IMAGE_NAME = 'admin-server'
         DOCKER_TAG = 'latest'
+        APP_PORT = '9090'
     }
 
     stages {
-        stage('Checkout SCM') {
+        stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
         stage('Build .jar') {
-            steps {
-                script {
-                    // Run Maven to build the project and create the JAR file
-                    sh 'mvn clean install'
+            agent {
+                docker {
+                    image 'maven:3.8.8-eclipse-temurin-17'
+                    reuseNode true
                 }
+            }
+            steps {
+                sh 'mvn clean install'
             }
         }
 
         stage('Build Docker Image') {
+            agent {
+                docker {
+                    image 'docker:24.0.7'
+                    args '''-v /var/run/docker.sock:/var/run/docker.sock
+                           -v /tmp:/tmp
+                           -v /var/lib/jenkins/.docker:/root/.docker
+                           -u root'''
+                    reuseNode true
+                }
+            }
             steps {
                 script {
-                    // Build Docker image for the API Gateway
-                    sh "docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_TAG} ."
+                    sh 'docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_TAG} .'
                 }
             }
         }
 
-        stage('Run Docker Container') {
+        stage('Run Container') {
             steps {
                 script {
-                    // Run the Docker container
-                    sh "docker run -d -p 9090:9090 --name admin-server-container ${DOCKER_IMAGE_NAME}:${DOCKER_TAG}"
+                    // First remove any existing container
+                    sh 'docker rm -f admin-server || true'
+                    
+                    // Run new container with proper port mapping
+                    sh 'docker run -d -p ${APP_PORT}:${APP_PORT} --name admin-server ${DOCKER_IMAGE_NAME}:${DOCKER_TAG}'
+                    
+                    // Add health check
+                    sh '''
+                        echo "Waiting for Admin Server to start..."
+                        while ! curl -s http://localhost:${APP_PORT}/actuator/health; do
+                            sleep 5
+                        done
+                        echo "Admin Server is up!"
+                    '''
                 }
             }
         }
     }
 
     post {
-        always {
-            // Clean up any Docker containers or images if needed
-            sh 'docker rm -f admin-server-container || true'
-        }
-
-        success {
-            // Any actions after success (e.g., sending a success notification)
-            echo 'Build and deployment successful!'
-        }
-
         failure {
-            // Actions if build fails (e.g., sending failure notification)
-            echo 'Build failed. Please check logs.'
+            sh 'docker rm -f admin-server || true'
         }
     }
 }
